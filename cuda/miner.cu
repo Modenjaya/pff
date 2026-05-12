@@ -2,8 +2,16 @@
 #include <stdint.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "keccak.cuh"
 
-__device__ inline uint64_t mix(uint64_t x) {
+#define THREADS 256
+#define BLOCKS 4096
+
+__device__ int found = 0;
+__device__ unsigned long long found_nonce = 0;
+
+__device__ inline uint64_t simple_mix(uint64_t x)
+{
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
     x ^= x >> 33;
@@ -12,59 +20,70 @@ __device__ inline uint64_t mix(uint64_t x) {
     return x;
 }
 
-__global__ void search_nonce(
-    uint64_t start_nonce,
-    uint64_t target,
-    uint64_t* found_nonce,
-    int* found
-) {
-    uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void mine_kernel(
+    unsigned long long start_nonce,
+    unsigned long long target
+)
+{
+    unsigned long long idx =
+        blockIdx.x * blockDim.x + threadIdx.x;
 
-    uint64_t nonce = start_nonce + idx;
+    unsigned long long nonce =
+        start_nonce + idx;
 
-    uint64_t hash = mix(nonce);
+    uint64_t hash = simple_mix(nonce);
 
     if (hash < target) {
-        if (atomicCAS(found, 0, 1) == 0) {
-            *found_nonce = nonce;
+
+        if (atomicCAS(&found, 0, 1) == 0) {
+            found_nonce = nonce;
         }
     }
 }
 
-int main(int argc, char** argv) {
-    uint64_t* d_nonce;
-    int* d_found;
+int main(int argc, char** argv)
+{
+    unsigned long long start_nonce =
+        (unsigned long long)time(NULL);
 
-    cudaMalloc(&d_nonce, sizeof(uint64_t));
-    cudaMalloc(&d_found, sizeof(int));
-
-    cudaMemset(d_found, 0, sizeof(int));
-
-    uint64_t start_nonce = 0;
+    unsigned long long target =
+        0x0000FFFFFFFFFFFFULL;
 
     while (true) {
-        search_nonce<<<4096, 256>>>(
+
+        cudaMemsetToSymbol(found, 0, sizeof(int));
+
+        mine_kernel<<<BLOCKS, THREADS>>>(
             start_nonce,
-            0x0000FFFFFFFFFFFFULL,
-            d_nonce,
-            d_found
+            target
         );
 
-        int found;
-        cudaMemcpy(&found, d_found, sizeof(int), cudaMemcpyDeviceToHost);
+        cudaDeviceSynchronize();
 
-        if (found) {
-            uint64_t nonce;
+        int h_found;
 
-            cudaMemcpy(&nonce, d_nonce, sizeof(uint64_t), cudaMemcpyDeviceToHost);
+        cudaMemcpyFromSymbol(
+            &h_found,
+            found,
+            sizeof(int)
+        );
+
+        if (h_found) {
+
+            unsigned long long nonce;
+
+            cudaMemcpyFromSymbol(
+                &nonce,
+                found_nonce,
+                sizeof(unsigned long long)
+            );
 
             std::cout << nonce << std::endl;
 
-            break;
+            return 0;
         }
 
-        start_nonce += (4096ULL * 256ULL);
+        start_nonce +=
+            (THREADS * BLOCKS);
     }
-
-    return 0;
 }
